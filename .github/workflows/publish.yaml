@@ -1,0 +1,108 @@
+name: "🚀 Publish Plugin"
+
+on:
+  release:
+    types:
+      - released
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        run: |-
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid tag '${{ github.event.release.tag_name }}': use the format vX.Y.Z.W (e.g. v0.1.0.1)"
+            exit 1
+          fi
+          sed -i "s/^version: .*/version: \"$VERSION\"/" build.yaml
+          sed -i -E "s#<(Version|AssemblyVersion|FileVersion)>[^<]*</#<\1>$VERSION</#" Directory.Build.props
+          grep -n "version" build.yaml
+          cat Directory.Build.props
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.*"
+
+      - name: Build Jellyfin Plugin
+        uses: oddstr13/jellyfin-plugin-repository-manager@9497a0a499416cc572ed2e07a391d9f943a37b4d # v1.1.1
+        id: jprm
+        with:
+          dotnet-target: "net10.0"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: build-artifact
+          retention-days: 30
+          if-no-files-found: error
+          path: ${{ steps.jprm.outputs.artifact }}
+
+      - name: Upload patched build.yaml
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: build-yaml
+          retention-days: 30
+          if-no-files-found: error
+          path: build.yaml
+
+  upload:
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: build-artifact
+
+      - name: Prepare GitHub Release assets
+        run: |-
+          for file in ./*; do
+            md5sum ${file#./} >> ${file%.*}.md5
+            sha256sum ${file#./} >> ${file%.*}.sha256
+          done
+          ls -l
+
+      - name: Upload GitHub Release assets
+        uses: shogo82148/actions-upload-release-asset@v1.9.2
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./*
+
+      - name: Download patched build.yaml
+        uses: actions/download-artifact@v7
+        with:
+          name: build-yaml
+          path: ${{ runner.temp }}/build-yaml
+
+      # The manifest generator (jellyfin-plugin-repo-action) prefers an asset named
+      # build.yaml over the one committed in the tag: it takes "version" from there.
+      - name: Upload build.yaml as release asset
+        uses: shogo82148/actions-upload-release-asset@v1.9.2
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ runner.temp }}/build-yaml/build.yaml
+
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    needs:
+      - upload
+    steps:
+      - name: Jellyfin plugin repo
+        uses: Kevinjil/jellyfin-plugin-repo-action@v0.4.3
+        with:
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
