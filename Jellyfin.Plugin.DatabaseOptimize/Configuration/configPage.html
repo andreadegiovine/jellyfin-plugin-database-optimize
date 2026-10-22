@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Database optimize</title>
+</head>
+<body>
+<div id="DatabaseOptimizeConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2 class="sectionTitle">Database optimize</h2>
+            <form id="DatabaseOptimizeConfigForm">
+                <div class="checkboxContainer checkboxContainer-withDescripton">
+                    <label class="emby-checkbox-label">
+                        <input id="ExecuteDatabaseOperations" name="ExecuteDatabaseOperations" type="checkbox" is="emby-checkbox" />
+                        <span>Execute operations on the database</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        When enabled, the repair operations are really executed on the database.
+                        When disabled (default), the task only writes to the log every operation it
+                        would execute and the reason why it is needed, and nothing is changed in the
+                        database. Use it for a first debug run.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescripton">
+                    <label class="emby-checkbox-label">
+                        <input id="BackupBeforeRun" name="BackupBeforeRun" type="checkbox" is="emby-checkbox" />
+                        <span>Create a backup before the run</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Copies the database to the backup folder right before the repair, only when
+                        problems were found and "Execute operations on the database" is enabled. If
+                        the backup fails, the repair is not executed.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="BackupPath">Backup folder (absolute path)</label>
+                    <input id="BackupPath" name="BackupPath" type="text" is="emby-input" placeholder="/path/to/backups" />
+                    <div class="fieldDescription">
+                        Absolute path of the folder that receives the backups. The timestamp of the
+                        run is added at the end of the file name, for example
+                        jellyfin_20260101-030000.db. The folder is created if it does not exist.
+                    </div>
+                </div>
+
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '1d641174-c27f-4b9c-be54-f5261fec5b28';
+            var page = document.querySelector('#DatabaseOptimizeConfigPage');
+
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    document.querySelector('#ExecuteDatabaseOperations').checked = !!config.ExecuteDatabaseOperations;
+                    document.querySelector('#BackupBeforeRun').checked = !!config.BackupBeforeRun;
+                    document.querySelector('#BackupPath').value = config.BackupPath || '';
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+            document.querySelector('#DatabaseOptimizeConfigForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.ExecuteDatabaseOperations = document.querySelector('#ExecuteDatabaseOperations').checked;
+                    config.BackupBeforeRun = document.querySelector('#BackupBeforeRun').checked;
+                    config.BackupPath = document.querySelector('#BackupPath').value.trim();
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -53,11 +54,80 @@ public sealed class DatabaseDoctor : IDatabaseDoctor
     }
 
     /// <inheritdoc />
-    public async Task<RepairResult> RepairAsync(DatabaseHealthReport report, CancellationToken cancellationToken)
+    public async Task<string> BackupAsync(string directory, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathRooted(directory))
+        {
+            throw new InvalidOperationException("The backup path must be a non-empty absolute path.");
+        }
+
+        Directory.CreateDirectory(directory);
+
+        var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // The file of the main database, to name the backup after it.
+                var databases = await SqliteQuery.QueryAsync(
+                    context,
+                    "PRAGMA database_list",
+                    reader => (Name: SqliteQuery.Text(reader, 1), File: SqliteQuery.Text(reader, 2)),
+                    cancellationToken).ConfigureAwait(false);
+                var source = databases
+                    .Where(d => string.Equals(d.Name, "main", StringComparison.OrdinalIgnoreCase))
+                    .Select(d => d.File)
+                    .FirstOrDefault() ?? string.Empty;
+
+                var name = Path.GetFileNameWithoutExtension(source);
+                var extension = Path.GetExtension(source);
+                var target = Path.Combine(
+                    directory,
+                    (string.IsNullOrEmpty(name) ? "jellyfin" : name)
+                    + "_" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)
+                    + (string.IsNullOrEmpty(extension) ? ".db" : extension));
+
+                if (File.Exists(target))
+                {
+                    throw new IOException("The backup file already exists: " + target);
+                }
+
+                // VACUUM INTO writes a consistent copy of the database, including what is still in
+                // the write-ahead log, while the server keeps running. A DbCommand is used because
+                // the raw SQL helpers of EF Core would interpret braces in the path.
+                var command = context.Database.GetDbConnection().CreateCommand();
+                await using (command.ConfigureAwait(false))
+                {
+                    command.CommandText = "VACUUM INTO " + SqlText.Literal(target);
+                    command.CommandTimeout = 3600;
+                    await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                return target;
+            }
+            finally
+            {
+                await context.Database.CloseConnectionAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<RepairResult> RepairAsync(DatabaseHealthReport report, bool execute, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(report);
 
         var result = new RepairResult();
+
+        if (!execute)
+        {
+            // Dry run: no context, no connection and no transaction are created, so nothing can
+            // reach the database. Every operation is only logged.
+            await RepairCoreAsync(null, report, result, cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+
         var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
@@ -234,8 +304,12 @@ public sealed class DatabaseDoctor : IDatabaseDoctor
         });
     }
 
+    private static long CountOf(DatabaseHealthReport report, FindingKind kind)
+        => report.Findings.Where(f => f.Kind == kind).Sum(f => f.Count);
+
+    // A null context means dry run: the statements are logged and never executed.
     private async Task RepairCoreAsync(
-        JellyfinDbContext context,
+        JellyfinDbContext? context,
         DatabaseHealthReport report,
         RepairResult result,
         CancellationToken cancellationToken)
@@ -243,20 +317,26 @@ public sealed class DatabaseDoctor : IDatabaseDoctor
         // 1. Orphaned rows, for every foreign key of the schema. Rows whose foreign key column
         // accepts NULL are detached (set to NULL), the others are deleted: nothing else can be
         // done with a row that points to nothing. A second pass handles what a cascade exposed.
-        var orphanKeys = report.Findings
+        var orphanFindings = report.Findings
             .Where(f => f.Kind == FindingKind.OrphanedRows && f.ForeignKey is not null)
-            .Select(f => f.ForeignKey!)
             .ToList();
-        for (var pass = 1; pass <= MaxOrphanPasses && orphanKeys.Count > 0; pass++)
+        for (var pass = 1; pass <= MaxOrphanPasses && orphanFindings.Count > 0; pass++)
         {
             var changed = 0;
-            foreach (var fk in orphanKeys)
+            foreach (var finding in orphanFindings)
             {
+                var fk = finding.ForeignKey!;
+                var reason = $"rows of {fk.ChildTable} point to a {fk.ParentTable} row that does not exist (foreign key violation, SQLite Error 19 when Jellyfin touches them); "
+                    + (fk.IsNullable
+                        ? $"{fk.ChildColumn} accepts NULL, so the reference is cleared"
+                        : $"{fk.ChildColumn} does not accept NULL, so the rows are deleted");
                 changed += await ExecuteAsync(
                     context,
                     result,
                     (fk.IsNullable ? "Detach orphaned rows: " : "Delete orphaned rows: ") + fk.Description,
+                    reason,
                     FixOrphansSql(fk),
+                    finding.Count,
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -272,11 +352,25 @@ public sealed class DatabaseDoctor : IDatabaseDoctor
         }
 
         // 2. Alternate versions: owner and primary version must agree and point to the primary item.
-        await ExecuteAsync(context, result, "Alternate versions: owner from PrimaryVersionId", AlternateVersionSql.OwnerFromPrimaryVersion, cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(
+            context,
+            result,
+            "Alternate versions: owner from PrimaryVersionId",
+            "OwnerId differs from PrimaryVersionId and PrimaryVersionId points to a primary item, so the alternate belongs to that item",
+            AlternateVersionSql.OwnerFromPrimaryVersion,
+            null,
+            cancellationToken).ConfigureAwait(false);
 
         for (var pass = 1; pass <= MaxOwnerChainPasses; pass++)
         {
-            var rows = await ExecuteAsync(context, result, "Alternate versions: flatten owner chain", AlternateVersionSql.FlattenOwnerChain, cancellationToken).ConfigureAwait(false);
+            var rows = await ExecuteAsync(
+                context,
+                result,
+                "Alternate versions: flatten owner chain",
+                "an alternate version is owned by another alternate version instead of the primary item (moved one level up, repeated until no row changes)",
+                AlternateVersionSql.FlattenOwnerChain,
+                CountOf(report, FindingKind.AlternateOwnerChain),
+                cancellationToken).ConfigureAwait(false);
             if (rows == 0)
             {
                 break;
@@ -288,29 +382,80 @@ public sealed class DatabaseDoctor : IDatabaseDoctor
             }
         }
 
-        await ExecuteAsync(context, result, "Alternate versions: align PrimaryVersionId with OwnerId", AlternateVersionSql.AlignPrimaryVersion, cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(
+            context,
+            result,
+            "Alternate versions: align PrimaryVersionId with OwnerId",
+            "PrimaryVersionId is NULL or different from OwnerId on an alternate version",
+            AlternateVersionSql.AlignPrimaryVersion,
+            CountOf(report, FindingKind.AlternatePrimaryMismatch),
+            cancellationToken).ConfigureAwait(false);
 
         // 3. Alternate versions whose file is gone. Jellyfin cannot delete them itself while
         // something still points to them, which is what produces the foreign key errors in the scans.
         foreach (var chunk in report.MissingAlternateIds.Where(id => Guid.TryParse(id, out _)).Chunk(DeleteChunkSize))
         {
             var list = string.Join(",", chunk.Select(SqlText.Literal));
-            await ExecuteAsync(context, result, "Delete links of missing alternate versions", "DELETE FROM LinkedChildren WHERE ChildId IN (" + list + ") OR ParentId IN (" + list + ")", cancellationToken).ConfigureAwait(false);
-            await ExecuteAsync(context, result, "Delete missing alternate versions", "DELETE FROM BaseItems WHERE Id IN (" + list + ")", cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(
+                context,
+                result,
+                "Delete links of missing alternate versions",
+                "the file of these alternate versions no longer exists (its folder does), and Jellyfin cannot delete them while links still point to them",
+                "DELETE FROM LinkedChildren WHERE ChildId IN (" + list + ") OR ParentId IN (" + list + ")",
+                null,
+                cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(
+                context,
+                result,
+                "Delete missing alternate versions",
+                "the file of these alternate versions no longer exists (its folder does)",
+                "DELETE FROM BaseItems WHERE Id IN (" + list + ")",
+                chunk.Length,
+                cancellationToken).ConfigureAwait(false);
         }
 
         // 4. Alternate version links must mirror BaseItems.OwnerId.
-        await ExecuteAsync(context, result, "Delete inconsistent alternate version links", AlternateVersionSql.DeleteInconsistentLinks, cancellationToken).ConfigureAwait(false);
-        await ExecuteAsync(context, result, "Add missing alternate version links", AlternateVersionSql.InsertMissingLinks, cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(
+            context,
+            result,
+            "Delete inconsistent alternate version links",
+            "LinkedChildren alternate version links whose child is not owned by the parent of the link",
+            AlternateVersionSql.DeleteInconsistentLinks,
+            CountOf(report, FindingKind.AlternateLinkInconsistent),
+            cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(
+            context,
+            result,
+            "Add missing alternate version links",
+            "alternate versions have no LinkedChildren link from their primary item",
+            AlternateVersionSql.InsertMissingLinks,
+            CountOf(report, FindingKind.AlternateLinkMissing),
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<int> ExecuteAsync(
-        JellyfinDbContext context,
+        JellyfinDbContext? context,
         RepairResult result,
         string description,
+        string reason,
         string sql,
+        long? matching,
         CancellationToken cancellationToken)
     {
+        if (context is null)
+        {
+            // Dry run: say what would be done and why. The row count is what matches in the
+            // current, unmodified database, so the counts of later steps ignore earlier ones.
+            _logger.LogInformation(
+                Plugin.LogPrefix + "[DRY RUN] Would execute: {Description} | Reason: {Reason} | Rows matching now: {Rows} | SQL: {Sql}",
+                description,
+                reason,
+                matching.HasValue ? matching.Value.ToString(CultureInfo.InvariantCulture) : "unknown",
+                sql);
+            result.Add(new RepairStep(description, 0, null));
+            return 0;
+        }
+
         try
         {
             var rows = await context.Database.ExecuteSqlRawAsync(sql, cancellationToken).ConfigureAwait(false);

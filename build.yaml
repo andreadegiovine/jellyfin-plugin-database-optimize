@@ -9,8 +9,9 @@ description: >
   Adds a scheduled task, "Database optimize", that reads the live schema of jellyfin.db (every table
   and every foreign key), checks the integrity of the database, looks for orphaned rows and for
   inconsistent alternate versions (the cause of "FOREIGN KEY constraint failed" errors while
-  scanning libraries) and repairs them in a single transaction. The plugin has no settings page:
-  run the task from Dashboard > Scheduled Tasks.
+  scanning libraries) and repairs them in a single transaction. By default the task only logs the
+  operations it would run (dry run); enable the execution, and optionally a backup before the run,
+  in the plugin settings. Run the task from Dashboard > Scheduled Tasks.
 category: "General"
 owner: "andreadegiovine"
 artifacts:

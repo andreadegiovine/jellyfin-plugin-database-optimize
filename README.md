@@ -4,8 +4,19 @@ A Jellyfin **12** plugin that adds a scheduled task, **Database optimize**, whic
 schema of `jellyfin.db`, checks the database and repairs the problems that make library scans
 fail with `SQLite Error 19: 'FOREIGN KEY constraint failed'`.
 
-The plugin has **no settings page**. It only adds the task, under
-*Dashboard → Scheduled Tasks → Maintenance*.
+The task is under *Dashboard → Scheduled Tasks → Maintenance*; its options are in the plugin
+settings page (*Dashboard → Plugins → Database optimize*).
+
+## Settings
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| Execute operations on the database | off | When off, the task only logs every operation it would run and why, and sends nothing to the database (dry run). When on, the repair is executed. |
+| Create a backup before the run | off | When on (and operations are executed), a copy of the database is written to the backup folder right before the repair, only if problems were found. If the backup fails, the repair is not executed. |
+| Backup folder (absolute path) | empty | Folder that receives the backups. The run timestamp is added at the end of the file name, e.g. `jellyfin_20260101-030000.db`. |
+
+Run the task once in dry run mode first and read the lines starting with `Database optimize:`
+(`[DRY RUN] Would execute: ...`) before enabling the execution.
 
 ## Requirements
 

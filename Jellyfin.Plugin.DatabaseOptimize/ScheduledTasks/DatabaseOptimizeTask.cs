@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.DatabaseOptimize.Configuration;
 using Jellyfin.Plugin.DatabaseOptimize.Models;
 using Jellyfin.Plugin.DatabaseOptimize.Services;
 using MediaBrowser.Controller.Library;
@@ -75,9 +76,18 @@ public sealed class DatabaseOptimizeTask : IScheduledTask
             return;
         }
 
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var execute = config.ExecuteDatabaseOperations;
+
         try
         {
             progress.Report(0);
+            _logger.LogInformation(
+                Plugin.LogPrefix + "Mode: {Mode}. Backup before the run: {Backup}",
+                execute ? "EXECUTE (the repair changes the database)" : "DRY RUN (operations are only logged, the database is not changed)",
+                config.BackupBeforeRun
+                    ? (execute ? "enabled, folder '" + config.BackupPath + "'" : "enabled but skipped in dry run")
+                    : "disabled");
             _logger.LogInformation(Plugin.LogPrefix + "Reading the schema and checking the database...");
             var report = await _doctor.DiagnoseAsync(cancellationToken).ConfigureAwait(false);
             LogReport(report);
@@ -96,7 +106,30 @@ public sealed class DatabaseOptimizeTask : IScheduledTask
                 return;
             }
 
-            var result = await _doctor.RepairAsync(report, cancellationToken).ConfigureAwait(false);
+            if (!execute)
+            {
+                _logger.LogInformation(Plugin.LogPrefix + "Dry run: the operations that would be executed follow. Nothing is sent to the database.");
+                await _doctor.RepairAsync(report, false, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation(Plugin.LogPrefix + "Dry run completed: the database was not changed. Enable 'Execute operations on the database' in the plugin settings to apply them.");
+                progress.Report(100);
+                return;
+            }
+
+            if (config.BackupBeforeRun)
+            {
+                try
+                {
+                    var backup = await _doctor.BackupAsync(config.BackupPath, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation(Plugin.LogPrefix + "Backup created: {Path}", backup);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, Plugin.LogPrefix + "The backup failed: nothing was repaired");
+                    return;
+                }
+            }
+
+            var result = await _doctor.RepairAsync(report, true, cancellationToken).ConfigureAwait(false);
             LogResult(result);
             progress.Report(80);
 
