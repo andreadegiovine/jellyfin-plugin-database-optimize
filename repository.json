@@ -1,12 +1,20 @@
 [
   {
     "category": "General",
-    "description": "Adds a scheduled task, \"Database optimize\", that reads the live schema of jellyfin.db (every table and every foreign key), checks the integrity of the database, looks for orphaned rows and for inconsistent alternate versions (the cause of \"FOREIGN KEY constraint failed\" errors while scanning libraries) and repairs them in a single transaction. The plugin has no settings page: run the task from Dashboard > Scheduled Tasks.\n",
+    "description": "Adds a scheduled task, \"Database optimize\", that reads the live schema of jellyfin.db (every table and every foreign key), checks the integrity of the database, looks for orphaned rows and for inconsistent alternate versions (the cause of \"FOREIGN KEY constraint failed\" errors while scanning libraries) and repairs them in a single transaction. By default the task only logs the operations it would run (dry run); enable the execution, and optionally a backup before the run, in the plugin settings. Run the task from Dashboard > Scheduled Tasks.\n",
     "guid": "1d641174-c27f-4b9c-be54-f5261fec5b28",
     "name": "Database optimize",
     "overview": "Scheduled task that checks the Jellyfin database and repairs foreign key problems",
     "owner": "andreadegiovine",
     "versions": [
+      {
+        "changelog": "",
+        "checksum": "a9af16e2e6f971db9846fb66d2c66ce9",
+        "sourceUrl": "https://github.com/andreadegiovine/jellyfin-plugin-database-optimize/releases/download/v0.1.0.1/database-optimize_0.1.0.1.zip",
+        "targetAbi": "12.0.0.0",
+        "timestamp": "2026-10-22T08:13:48Z",
+        "version": "0.1.0.1"
+      },
       {
         "changelog": "",
         "checksum": "8332027216923bd1e90456e8bd3ce6a7",
